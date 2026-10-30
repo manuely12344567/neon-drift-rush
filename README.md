@@ -6,7 +6,7 @@
 
 [![Android](https://img.shields.io/badge/Android-5.0%2B%20(API%2021%2B)-brightgreen)](https://developer.android.com)
 [![APK](https://img.shields.io/badge/APK-724%20Ko-blue)](dist/NeonDrift-1.0.apk)
-[![Tests](https://img.shields.io/badge/tests-27%20unitaires%20%2B%202%20rendus-success)](#tests)
+[![Tests](https://img.shields.io/badge/tests-27%20unitaires%20%2B%205%20rendu-25success)](#tests)
 
 </div>
 
@@ -98,7 +98,13 @@ Elles couvrent, entre autres :
 * **courbe de difficulté**, **événement de nouveau record**, **gel de la
   simulation après la mort**.
 
-### 2. Le rendu — `test/render/RenderHarness.java`
+### 2. Le rendu et la non-régression — `test/render/`
+
+* `ResizeRegressionTest.java` — reproduit le plantage corrigé en 1.1 : un
+  `resize()` ne doit jamais recycler un bitmap qu'une frame est en train de
+  dessiner, et une nouvelle taille doit être appliquée à la frame suivante.
+  Ce test échoue sur la 1.0 et passe sur la 1.1.
+* `RenderHarness.java` — produit les captures ci-dessus et vérifie le rendu.
 
 Le renderer réel est exécuté hors du téléphone (Robolectric en mode graphique
 natif), ce qui produit les captures du dossier `screenshots/` **et** vérifie

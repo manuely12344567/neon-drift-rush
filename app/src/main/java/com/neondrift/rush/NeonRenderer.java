@@ -57,6 +57,14 @@ public final class NeonRenderer {
 
     private Bitmap background;
     private Bitmap skyline;
+    /** Size requested by the view; applied by the render thread (see below). */
+    private volatile int pendingWidth = 1080;
+    private volatile int pendingHeight = 2400;
+    private int appliedWidth = -1;
+    private int appliedHeight = -1;
+    /** Cached full-screen gradients, rebuilt only when the size changes. */
+    private Shader groundShader;
+    private Shader roadShader;
     private Shader scanShader;
     private Shader vignette;
     private Shader skyFallback;
@@ -102,14 +110,42 @@ public final class NeonRenderer {
 
     // ------------------------------------------------------------------ layout
 
+    /**
+     * Requests a new drawing size.
+     *
+     * <p>Safe to call from any thread (the view calls it from
+     * {@code surfaceChanged}, i.e. the UI thread): this only records the
+     * request. The expensive part - rebuilding the cached bitmaps - is done by
+     * the render thread at the beginning of its next frame, in
+     * {@link #applyPendingSize()}.
+     *
+     * <p>This used to rebuild and {@code recycle()} the bitmaps right here,
+     * which meant that a single window relayout (Android relayouts the surface
+     * a second or two after launch, when the immersive mode hides the system
+     * bars) could recycle a bitmap the render thread was drawing, killing the
+     * process with "Canvas: trying to use a recycled bitmap". Never again.
+     */
     public void resize(int width, int height) {
         if (width <= 0 || height <= 0) {
             return;
         }
-        this.w = width;
-        this.h = height;
-        this.unit = width / 1080f;
-        persp.configure(width, height);
+        pendingWidth = width;
+        pendingHeight = height;
+    }
+
+    /** Applies a pending size request. Render thread only. */
+    private void applyPendingSize() {
+        int newWidth = pendingWidth;
+        int newHeight = pendingHeight;
+        if (newWidth == appliedWidth && newHeight == appliedHeight) {
+            return;
+        }
+        appliedWidth = newWidth;
+        appliedHeight = newHeight;
+        this.w = newWidth;
+        this.h = newHeight;
+        this.unit = newWidth / 1080f;
+        persp.configure(this.w, this.h);
 
         buildBackground();
         buildSkyline();
@@ -125,6 +161,11 @@ public final class NeonRenderer {
         btnPause.set(w - bs * 2.35f, bs * 0.55f, w - bs * 0.45f, bs * 1.45f);
         btnSound.set(w - bs * 4.0f, bs * 0.55f, w - bs * 2.1f, bs * 1.45f);
         btnMusic.set(w - bs * 5.7f, bs * 0.55f, w - bs * 3.8f, bs * 1.45f);
+    }
+
+    /** True once a size has been applied and the caches are ready. */
+    public boolean isReady() {
+        return appliedWidth > 0 && appliedHeight > 0;
     }
 
     public RectF playButton() {
@@ -158,15 +199,17 @@ public final class NeonRenderer {
 
     private void buildBackground() {
         int iw = Math.max(1, (int) w);
-        int ih = Math.max(1, (int) h);
-        if (background != null && background.getWidth() == iw && background.getHeight() == ih) {
+        int ih = Math.max(1, (int) (persp.horizonY + h * 0.06f));
+        Bitmap sky = null;
+        try {
+            sky = Bitmap.createBitmap(iw, ih, Bitmap.Config.ARGB_8888);
+        } catch (OutOfMemoryError oom) {
+            // very small heap: fall back to per-frame gradients, the game stays
+            // playable instead of dying on a low-end device
+            background = null;
             return;
         }
-        if (background != null) {
-            background.recycle();
-        }
-        background = Bitmap.createBitmap(iw, ih, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(background);
+        Canvas c = new Canvas(sky);
         float horizon = persp.horizonY;
 
         // --- sky -------------------------------------------------------------
@@ -176,7 +219,6 @@ public final class NeonRenderer {
         fill.setShader(skyFallback);
         c.drawRect(0, 0, w, horizon + 2f, fill);
         fill.setShader(null);
-        c.drawRect(0, horizon, w, h, solid(Palette.BG_TOP));
 
         // --- stars -----------------------------------------------------------
         Random rnd = new Random(20260101L);
@@ -202,7 +244,7 @@ public final class NeonRenderer {
         float sunR = w * 0.20f;
         float sunCx = persp.centreX;
         float sunCy = horizon - sunR * 0.42f;
-        c.saveLayer(0, 0, w, h, null);
+        c.saveLayer(0, 0, w, ih, null);
         fill.setShader(new LinearGradient(0, sunCy - sunR, 0, sunCy + sunR,
                 Palette.SUN_TOP, Palette.SUN_BOTTOM, Shader.TileMode.CLAMP));
         c.drawCircle(sunCx, sunCy, sunR, fill);
@@ -222,13 +264,16 @@ public final class NeonRenderer {
         drawRidge(c, horizon, w * 0.155f, 0xFF2A0B44, 8, 909L);
         drawRidge(c, horizon, w * 0.095f, 0xFF1B0730, 6, 313L);
 
-        // --- ground below the horizon ---------------------------------------
-        c.drawRect(0, horizon, w, h, solid(Palette.ROAD));
-        fill.setShader(new LinearGradient(0, horizon, 0, h,
-                new int[]{Palette.alpha(0xFF1A0538, 255), Palette.ROAD},
-                null, Shader.TileMode.CLAMP));
-        c.drawRect(0, horizon, w, h, fill);
-        fill.setShader(null);
+        background = sky;
+
+        // The ground below the horizon is a cheap cached gradient drawn every
+        // frame instead of a full-screen bitmap (saves ~7 MB of heap).
+        groundShader = new LinearGradient(0, horizon, 0, h,
+                new int[]{0xFF1B0736, 0xFF0C0420, 0xFF050210},
+                new float[]{0f, 0.38f, 1f}, Shader.TileMode.CLAMP);
+        roadShader = new LinearGradient(0, horizon, 0, h,
+                new int[]{0xFF200E3C, 0xFF170B2C, 0xFF0D0620},
+                new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
     }
 
     private void drawRidge(Canvas c, float horizon, float amplitude, int color, int peaks,
@@ -254,11 +299,17 @@ public final class NeonRenderer {
     private void buildSkyline() {
         int iw = (int) (w * 2f);
         int ih = (int) (h * 0.16f);
-        if (skyline != null) {
-            skyline.recycle();
+        // no recycle(): the previous bitmap is simply dropped and collected,
+        // so a frame still holding it can never draw a recycled bitmap
+        Bitmap fresh;
+        try {
+            fresh = Bitmap.createBitmap(iw, ih, Bitmap.Config.ARGB_8888);
+        } catch (OutOfMemoryError oom) {
+            skyline = null;
+            return;
         }
-        skyline = Bitmap.createBitmap(iw, ih, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(skyline);
+        skyline = fresh;
+        Canvas c = new Canvas(fresh);
         Random rnd = new Random(777L);
         float baseY = ih;
         float x = 0f;
@@ -337,6 +388,19 @@ public final class NeonRenderer {
     public void draw(Canvas c, Engine engine, int mode, float anim, float dt,
                      boolean soundOn, boolean musicOn, float deathProgress) {
         musicOnState = musicOn;
+        // A Paint keeps its alpha/colour/shader between draws: reset what we
+        // share every frame, otherwise a colour set by the previous frame (or
+        // by the HUD) leaks into the next one and draws layers semi-transparent.
+        fill.setAlpha(255);
+        fill.setColor(Palette.WHITE);
+        fill.setShader(null);
+        stroke.setAlpha(255);
+        stroke.setShader(null);
+        applyPendingSize();
+        if (w <= 0f || h <= 0f) {
+            c.drawColor(Palette.BG_TOP);
+            return;
+        }
         updateParticles(dt);
         soundOnState = soundOn;
         c.drawColor(Palette.BG_TOP);
@@ -377,7 +441,17 @@ public final class NeonRenderer {
     private void drawSky(Canvas c, Engine engine, float anim) {
         if (background != null) {
             c.drawBitmap(background, 0, 0, null);
+        } else {
+            // fallback when the sky bitmap could not be allocated
+            fill.setShader(skyFallback);
+            c.drawRect(0, 0, w, persp.horizonY, fill);
+            fill.setShader(null);
         }
+        // ground below the horizon (cached gradient, one rect per frame)
+        fill.setAlpha(255);
+        fill.setShader(groundShader);
+        c.drawRect(0, persp.horizonY, w, h, fill);
+        fill.setShader(null);
         // parallax skyline
         if (skyline != null) {
             float sw = skyline.getWidth();
@@ -392,8 +466,10 @@ public final class NeonRenderer {
                 new int[]{Palette.alpha(Palette.HORIZON, (int) (46 * pulse)),
                         Palette.alpha(Palette.HORIZON, 0)},
                 null, Shader.TileMode.CLAMP));
+        // clipped to the sky: drawing the lower half of this radial glow over
+        // the ground left a visible magenta arc just below the horizon
         c.drawRect(persp.centreX - w * 0.55f, persp.horizonY - w * 0.52f,
-                persp.centreX + w * 0.55f, persp.horizonY + h * 0.1f, fill);
+                persp.centreX + w * 0.55f, persp.horizonY, fill);
         fill.setShader(null);
     }
 
@@ -401,13 +477,6 @@ public final class NeonRenderer {
         float nearD = 0.4f;
         float farD = Engine.FAR_D;
         float horizon = persp.horizonY;
-
-        // ---- ground outside the track --------------------------------------
-        fill.setShader(new LinearGradient(0, horizon, 0, h,
-                new int[]{0xFF1B0736, 0xFF0C0420, 0xFF050210},
-                new float[]{0f, 0.38f, 1f}, Shader.TileMode.CLAMP));
-        c.drawRect(0, horizon, w, h, fill);
-        fill.setShader(null);
 
         float scroll = engine.travel % GRID_STEP;
 
@@ -447,10 +516,10 @@ public final class NeonRenderer {
         path.lineTo(persp.screenX(1f, farD), yf);
         path.lineTo(persp.screenX(1f, nearD), yn);
         path.close();
-        fill.setShader(new LinearGradient(0, horizon, 0, h,
-                new int[]{0xFF200E3C, 0xFF170B2C, 0xFF0D0620},
-                new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
+        fill.setAlpha(255);
+        fill.setShader(roadShader);
         c.drawPath(path, fill);
+        fill.setAlpha(255);
         fill.setShader(null);
 
         // ---- track grid (brighter than the surrounding floor) ---------------
