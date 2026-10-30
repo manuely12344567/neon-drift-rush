@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FF05010F</color>
+    <color name="neon_cyan">#FF2EF2FF</color>
+    <color name="neon_magenta">#FFFF2E88</color>
+    <color name="icon_bg">#FF150330</color>
+</resources>
