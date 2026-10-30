@@ -49,6 +49,15 @@ public final class Sfx {
         try {
             music = MediaPlayer.create(context, R.raw.music_loop);
             if (music != null) {
+                music.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                    @Override
+                    public boolean onError(MediaPlayer mp, int what, int extra) {
+                        // A codec that cannot loop this file must not take the
+                        // whole app down: just give up on music.
+                        musicOn = false;
+                        return true;
+                    }
+                });
                 music.setLooping(true);
                 music.setVolume(0.30f, 0.30f);
             }

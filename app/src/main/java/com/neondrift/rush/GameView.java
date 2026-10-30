@@ -2,7 +2,10 @@ package com.neondrift.rush;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.os.Build;
+import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
@@ -11,16 +14,42 @@ import android.view.SurfaceView;
 import com.neondrift.rush.core.Engine;
 import com.neondrift.rush.core.Events;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
+
 /**
  * The game surface: owns the render thread, the input handling and the
  * screen-to-screen state machine (menu, playing, paused, game over).
+ *
+ * <h3>Threading contract</h3>
+ * Everything that touches the simulation ({@link Engine}) or the screen state is
+ * executed on the render thread. The UI thread may only:
+ * <ul>
+ *   <li>post a command ({@link #CMD_START}, {@link #CMD_PAUSE}, ...) through an
+ *       {@link AtomicInteger},</li>
+ *   <li>write the requested lateral position ({@link #inputTargetX}),</li>
+ *   <li>read {@code playerX} and the button rectangles for hit testing.</li>
+ * </ul>
+ * Before this was enforced, tapping "JOUER" called {@code engine.reset()} from
+ * the UI thread while the render thread was iterating the entity list, which
+ * could tear the {@code ArrayList} and kill the process.
  */
 public final class GameView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
+
+    private static final String TAG = "NeonDrift";
 
     private static final int MODE_MENU = NeonRenderer.MODE_MENU;
     private static final int MODE_PLAY = NeonRenderer.MODE_PLAY;
     private static final int MODE_PAUSED = NeonRenderer.MODE_PAUSED;
     private static final int MODE_OVER = NeonRenderer.MODE_OVER;
+
+    private static final int CMD_NONE = 0;
+    private static final int CMD_START = 1;
+    private static final int CMD_PAUSE = 2;
+    private static final int CMD_RESUME = 3;
+    private static final int CMD_MENU = 4;
 
     private static final float CRASH_TO_OVER = 1.15f;
     private static final long FRAME_NS = 16666666L;
@@ -30,20 +59,26 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
     private final Prefs prefs;
     private final Sfx sfx;
 
+    /** Command posted by the UI thread, consumed by the render thread. */
+    private final AtomicInteger command = new AtomicInteger(CMD_NONE);
+    /** Lateral position requested by the finger (render thread applies it). */
+    private volatile float inputTargetX;
+
     private Thread thread;
     private volatile boolean running;
     private volatile boolean surfaceReady;
     private volatile boolean activityPaused;
+    /** GPU canvas is much faster, but fall back to software if it misbehaves. */
+    private volatile boolean hardwareCanvas = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M;
 
-    private int mode = MODE_MENU;
+    // ----- state owned by the render thread (volatile: read by the UI thread)
+    private volatile int mode = MODE_MENU;
+    private volatile float overTime;
     private float anim;
-    private float overTime;
-    private double accumulator;
-
     private boolean dragging;
     private float grabOffset;
-    /** Locking the surface through the GPU is much faster on low-end phones. */
-    private boolean hardwareCanvas = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M;
+    /** Set when drawing failed for good: shows a diagnostic screen. */
+    private volatile String fatalError;
 
     public GameView(Context context) {
         super(context);
@@ -71,6 +106,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        // Only a request: the render thread applies it when it is safe to do so.
         renderer.resize(width, height);
     }
 
@@ -84,7 +120,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
     public void onActivityPause() {
         activityPaused = true;
         if (mode == MODE_PLAY) {
-            mode = MODE_PAUSED;
+            command.set(CMD_PAUSE);
         }
         sfx.pauseMusic();
     }
@@ -98,18 +134,19 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     /** Called from the activity onDestroy. */
     public void onActivityDestroy() {
+        stopLoop();
         sfx.release();
     }
 
     /** Back button handling. Returns true when the event was consumed. */
     public boolean handleBack() {
         if (mode == MODE_PLAY) {
-            mode = MODE_PAUSED;
+            command.set(CMD_PAUSE);
             sfx.play(Sfx.TAP);
             return true;
         }
         if (mode == MODE_PAUSED || mode == MODE_OVER) {
-            goToMenu();
+            command.set(CMD_MENU);
             return true;
         }
         return false;
@@ -121,7 +158,9 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         }
         running = true;
         thread = new Thread(this, "neon-drift-loop");
-        thread.setPriority(Thread.MAX_PRIORITY);
+        // NORM+1: a frame loop must not starve the UI thread, otherwise the
+        // system may consider the app unresponsive on slower devices.
+        thread.setPriority(Thread.NORM_PRIORITY + 1);
         thread.start();
         sfx.startMusic();
     }
@@ -132,7 +171,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         thread = null;
         if (t != null) {
             try {
-                t.join(400);
+                t.join(500);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
@@ -152,10 +191,23 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
             if (dt > 0.05f) {
                 dt = 0.05f;
             }
-            if (!activityPaused) {
-                step(dt);
+            try {
+                applyCommand();
+                if (!activityPaused && fatalError == null) {
+                    step(dt);
+                    drawFrame(dt);
+                }
+            } catch (Throwable t) {
+                // A frame must never be able to kill the app: recover once by
+                // falling back to the software canvas, then show a readable
+                // diagnostic instead of "l'application s'est arrêtée".
+                if (hardwareCanvas) {
+                    hardwareCanvas = false;
+                    Log.w(TAG, "Hardware canvas failed, falling back to software", t);
+                } else {
+                    fail(t);
+                }
             }
-            drawFrame(activityPaused ? 0f : dt);
 
             long spent = System.nanoTime() - frameStart;
             long wait = FRAME_NS - spent;
@@ -170,6 +222,30 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         }
     }
 
+    private void applyCommand() {
+        int cmd = command.getAndSet(CMD_NONE);
+        switch (cmd) {
+            case CMD_START:
+                startRun();
+                break;
+            case CMD_PAUSE:
+                if (mode == MODE_PLAY) {
+                    mode = MODE_PAUSED;
+                }
+                break;
+            case CMD_RESUME:
+                if (mode == MODE_PAUSED) {
+                    mode = MODE_PLAY;
+                }
+                break;
+            case CMD_MENU:
+                goToMenu();
+                break;
+            default:
+                break;
+        }
+    }
+
     private void drawFrame(float dt) {
         if (!surfaceReady) {
             return;
@@ -178,29 +254,25 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         SurfaceHolder holder = getHolder();
         try {
             if (hardwareCanvas) {
-                try {
-                    canvas = holder.lockHardwareCanvas();
-                } catch (Throwable unsupported) {
-                    hardwareCanvas = false;
-                    canvas = holder.lockCanvas();
-                }
+                canvas = holder.lockHardwareCanvas();
             } else {
                 canvas = holder.lockCanvas();
             }
             if (canvas == null) {
                 return;
             }
-            synchronized (this) {
+            if (fatalError != null) {
+                drawDiagnostic(canvas);
+            } else {
                 renderer.draw(canvas, engine, mode, anim, dt, prefs.sound(), prefs.music(),
                         overTime);
             }
-        } catch (IllegalStateException ignored) {
-            // surface went away under our feet
         } finally {
             if (canvas != null) {
                 try {
                     holder.unlockCanvasAndPost(canvas);
-                } catch (IllegalStateException ignored) {
+                } catch (Throwable ignored) {
+                    // surface gone
                 }
             }
         }
@@ -216,6 +288,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
                 break;
             case MODE_PLAY:
                 engine.demo = false;
+                engine.setTargetX(inputTargetX);
                 engine.update(dt);
                 drainEvents();
                 if (!engine.alive) {
@@ -248,7 +321,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
                     break;
                 case Events.CRASH:
                     sfx.play(Sfx.CRASH);
-                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    postHaptic(HapticFeedbackConstants.LONG_PRESS);
                     break;
                 case Events.NEW_RECORD:
                     sfx.play(Sfx.RECORD);
@@ -259,12 +332,23 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         }
     }
 
+    private void postHaptic(final int feedback) {
+        post(new Runnable() {
+            @Override
+            public void run() {
+                performHapticFeedback(feedback);
+            }
+        });
+    }
+
     // ------------------------------------------------------------- transitions
 
     private void startRun() {
         engine.demo = false;
         engine.reset(prefs.best());
         renderer.clearParticles();
+        inputTargetX = 0f;
+        dragging = false;
         overTime = 0f;
         mode = MODE_PLAY;
         sfx.play(Sfx.TAP);
@@ -312,6 +396,67 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
     }
 
+    // --------------------------------------------------------------- failures
+
+    /** Records the error, stops the loop and shows it on screen. */
+    private void fail(Throwable t) {
+        Log.e(TAG, "Fatal error in the game loop", t);
+        StringBuilder sb = new StringBuilder();
+        sb.append(t.toString()).append('\n');
+        StackTraceElement[] st = t.getStackTrace();
+        for (int i = 0; i < st.length && i < 8; i++) {
+            sb.append("  at ").append(st[i].toString()).append('\n');
+        }
+        saveError(sb.toString());
+        fatalError = sb.toString();
+        running = false;
+    }
+
+    private void saveError(String text) {
+        FileWriter writer = null;
+        try {
+            File dir = getContext().getFilesDir();
+            writer = new FileWriter(new File(dir, "last_error.txt"));
+            writer.write(text);
+        } catch (IOException ignored) {
+            // nothing else we can do
+        } finally {
+            if (writer != null) {
+                try {
+                    writer.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    /** Minimal, dependency-free screen (it must not touch the renderer). */
+    private void drawDiagnostic(Canvas c) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        c.drawColor(0xFF12061F);
+        int width = c.getWidth();
+        float size = Math.max(18f, width * 0.032f);
+        p.setTypeface(Typeface.MONOSPACE);
+        p.setTextSize(size);
+        p.setColor(0xFFFF6B8A);
+        float y = width * 0.10f;
+        c.drawText("NEON DRIFT - erreur", width * 0.05f, y, p);
+        p.setColor(0xFFEAF6FF);
+        y += size * 2f;
+        String[] lines = fatalError.split("\n");
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            while (line.length() > 0) {
+                int cut = Math.min(line.length(), (int) (width / (size * 0.62f)));
+                c.drawText(line.substring(0, cut), width * 0.05f, y, p);
+                line = line.substring(cut);
+                y += size * 1.35f;
+            }
+        }
+        p.setColor(0xFF93A9C6);
+        c.drawText("Detail enregistre dans last_error.txt", width * 0.05f, y + size, p);
+    }
+
     // ------------------------------------------------------------------ input
 
     @Override
@@ -322,8 +467,8 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
             case MotionEvent.ACTION_DOWN:
                 return onDown(x, y);
             case MotionEvent.ACTION_MOVE:
-                if (mode == MODE_PLAY && dragging) {
-                    engine.setTargetX(renderer.lateralAt(x) + grabOffset);
+                if (dragging) {
+                    inputTargetX = clampTarget(renderer.lateralAt(x) + grabOffset);
                 }
                 return true;
             case MotionEvent.ACTION_UP:
@@ -331,11 +476,21 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
                 dragging = false;
                 return true;
             default:
-                return super.onTouchEvent(event);
+                return true;
         }
     }
 
+    private static float clampTarget(float v) {
+        if (v < -Engine.TRACK_LIMIT) {
+            return -Engine.TRACK_LIMIT;
+        }
+        return v > Engine.TRACK_LIMIT ? Engine.TRACK_LIMIT : v;
+    }
+
     private boolean onDown(float x, float y) {
+        if (fatalError != null) {
+            return true;
+        }
         switch (mode) {
             case MODE_MENU:
                 if (renderer.soundButton().contains(x, y)) {
@@ -346,30 +501,27 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
                     toggleMusic();
                     return true;
                 }
-                if (renderer.playButton().contains(x, y) || y < getHeight() * 0.94f) {
-                    startRun();
-                    return true;
-                }
+                command.set(CMD_START);
                 return true;
 
             case MODE_PLAY:
                 if (renderer.pauseButton().contains(x, y)) {
-                    mode = MODE_PAUSED;
+                    command.set(CMD_PAUSE);
                     sfx.play(Sfx.TAP);
                     return true;
                 }
                 dragging = true;
                 grabOffset = engine.playerX - renderer.lateralAt(x);
                 grabOffset = Math.max(-0.6f, Math.min(0.6f, grabOffset));
-                engine.setTargetX(renderer.lateralAt(x) + grabOffset);
+                inputTargetX = clampTarget(renderer.lateralAt(x) + grabOffset);
                 return true;
 
             case MODE_PAUSED:
                 if (renderer.retryButton().contains(x, y)) {
-                    mode = MODE_PLAY;
+                    command.set(CMD_RESUME);
                     sfx.play(Sfx.TAP);
                 } else if (renderer.menuButton().contains(x, y)) {
-                    goToMenu();
+                    command.set(CMD_MENU);
                 }
                 return true;
 
@@ -378,9 +530,9 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
                     return true; // ignore the tap that killed the run
                 }
                 if (renderer.retryButton().contains(x, y)) {
-                    startRun();
+                    command.set(CMD_START);
                 } else if (renderer.menuButton().contains(x, y)) {
-                    goToMenu();
+                    command.set(CMD_MENU);
                 }
                 return true;
 
