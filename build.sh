@@ -135,6 +135,9 @@ if [ ! -f "$KEYSTORE" ]; then
     -dname "CN=NEON DRIFT, OU=Games, O=Neon Drift, L=Lome, C=TG" >/dev/null 2>&1
 fi
 
+# never ship a stale build: only the APKs of this run belong in dist/
+rm -f "$DIST"/NeonDrift-*.apk "$DIST"/NeonDrift-*.apk.idsig
+
 echo "-- zipalign"
 "$ZIPALIGN" -p -f 4 "$OUT/base.apk" "$OUT/aligned.apk"
 
