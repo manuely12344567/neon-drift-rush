@@ -5,6 +5,9 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -17,6 +20,7 @@ import com.neondrift.rush.core.Events;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -39,6 +43,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class GameView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
 
     private static final String TAG = "NeonDrift";
+    /** Kept in sync with build.sh; shown by the diagnostic overlay. */
+    private static final String VERSION = "1.2";
 
     private static final int MODE_MENU = NeonRenderer.MODE_MENU;
     private static final int MODE_PLAY = NeonRenderer.MODE_PLAY;
@@ -53,6 +59,14 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     private static final float CRASH_TO_OVER = 1.15f;
     private static final long FRAME_NS = 16666666L;
+    /** How often the watchdog checks that frames are still being posted. */
+    private static final long WATCHDOG_PERIOD_MS = 2000L;
+    /** No frame for that long means the render loop is stuck. */
+    private static final long STALL_MS = 4000L;
+    /** After that many restarts we stop pretending and show the diagnostic. */
+    private static final int MAX_RESTARTS = 3;
+    /** A state snapshot is written to last_state.txt this often. */
+    private static final long STATE_PERIOD_MS = 15000L;
 
     private final Engine engine;
     private final NeonRenderer renderer = new NeonRenderer();
@@ -66,6 +80,22 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     private Thread thread;
     private volatile boolean running;
+    /**
+     * Incremented every time a loop starts or stops: a thread whose generation
+     * is stale exits immediately, so two render loops can never run at once
+     * (that used to throw "surface already locked" and freeze the picture).
+     */
+    private final AtomicInteger loopGeneration = new AtomicInteger();
+    private final Handler watchdog = new Handler(Looper.getMainLooper());
+    /** Wall clock of the last frame actually posted to the surface. */
+    private volatile long lastFrameAt;
+    private volatile int restartCount;
+    private volatile long drawnFrames;
+    private volatile float fps;
+    private long lastStateAt;
+    private volatile boolean debugOverlay;
+    private int debugTaps;
+    private long debugTapAt;
     private volatile boolean surfaceReady;
     private volatile boolean activityPaused;
     /** GPU canvas is much faster, but fall back to software if it misbehaves. */
@@ -101,7 +131,10 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         surfaceReady = true;
+        lastFrameAt = SystemClock.uptimeMillis();
         startLoop();
+        watchdog.removeCallbacks(watchdogTask);
+        watchdog.postDelayed(watchdogTask, WATCHDOG_PERIOD_MS);
     }
 
     @Override
@@ -113,6 +146,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
+        watchdog.removeCallbacks(watchdogTask);
         stopLoop();
     }
 
@@ -130,6 +164,13 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         activityPaused = false;
         sfx.setMusicOn(prefs.music());
         sfx.startMusic();
+        // The surface may have been destroyed while we were in the background
+        // without surfaceCreated() being called again on some launchers: the
+        // app then stayed on a frozen frame for ever.
+        if (surfaceReady && !running && fatalError == null) {
+            startLoop();
+        }
+        lastFrameAt = SystemClock.uptimeMillis();
     }
 
     /** Called from the activity onDestroy. */
@@ -153,11 +194,14 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
     }
 
     private void startLoop() {
-        if (running) {
-            return;
-        }
+        final int generation = loopGeneration.incrementAndGet();
         running = true;
-        thread = new Thread(this, "neon-drift-loop");
+        thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                loop(generation);
+            }
+        }, "neon-drift-loop");
         // NORM+1: a frame loop must not starve the UI thread, otherwise the
         // system may consider the app unresponsive on slower devices.
         thread.setPriority(Thread.NORM_PRIORITY + 1);
@@ -167,6 +211,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     private void stopLoop() {
         running = false;
+        loopGeneration.incrementAndGet(); // a stale thread exits on its next check
         Thread t = thread;
         thread = null;
         if (t != null) {
@@ -183,8 +228,14 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     @Override
     public void run() {
+        loop(loopGeneration.get());
+    }
+
+    private void loop(int generation) {
         long last = System.nanoTime();
-        while (running) {
+        int frames = 0;
+        long fpsAt = last;
+        while (running && generation == loopGeneration.get()) {
             long frameStart = System.nanoTime();
             float dt = (frameStart - last) / 1e9f;
             last = frameStart;
@@ -207,6 +258,14 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
                 } else {
                     fail(t);
                 }
+            }
+
+            frames++;
+            long now = System.nanoTime();
+            if (now - fpsAt >= 1000000000L) {
+                fps = frames * 1e9f / (now - fpsAt);
+                frames = 0;
+                fpsAt = now;
             }
 
             long spent = System.nanoTime() - frameStart;
@@ -264,6 +323,7 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
             if (fatalError != null) {
                 drawDiagnostic(canvas);
             } else {
+                renderer.setDebugInfo(debugOverlay ? stateSnapshot("debug") : null);
                 renderer.draw(canvas, engine, mode, anim, dt, prefs.sound(), prefs.music(),
                         overTime);
             }
@@ -271,6 +331,15 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
             if (canvas != null) {
                 try {
                     holder.unlockCanvasAndPost(canvas);
+                    // heartbeat for the watchdog: the frame really reached the
+                    // surface, so the loop is alive
+                    long now = SystemClock.uptimeMillis();
+                    lastFrameAt = now;
+                    drawnFrames++;
+                    if (now - lastStateAt > STATE_PERIOD_MS) {
+                        lastStateAt = now;
+                        saveState(stateSnapshot("périodique"));
+                    }
                 } catch (Throwable ignored) {
                     // surface gone
                 }
@@ -396,6 +465,143 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
         performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
     }
 
+    // --------------------------------------------------------------- watchdog
+
+    /**
+     * Watches the render loop from the UI thread.
+     *
+     * <p>A stuck loop (a lock that never comes back, a driver hiccup) used to
+     * leave the app on a frozen frame with no way out. The watchdog restarts
+     * the loop, and after {@link #MAX_RESTARTS} failures it shows the readable
+     * diagnostic screen instead of a dead picture.
+     */
+    private final Runnable watchdogTask = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                checkRenderProgress();
+            } catch (Throwable t) {
+                Log.w(TAG, "watchdog", t);
+            }
+            if (surfaceReady) {
+                watchdog.postDelayed(this, WATCHDOG_PERIOD_MS);
+            }
+        }
+    };
+
+    private void checkRenderProgress() {
+        if (activityPaused || fatalError != null || !surfaceReady) {
+            lastFrameAt = SystemClock.uptimeMillis();
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        long idle = now - lastFrameAt;
+        if (idle < STALL_MS) {
+            return;
+        }
+        restartCount++;
+        String report = stateSnapshot("aucune image postée depuis " + idle + " ms");
+        Log.w(TAG, report);
+        saveError(report);
+        if (restartCount > MAX_RESTARTS) {
+            fail(new IllegalStateException("boucle de rendu bloquée (" + idle + " ms)"));
+            return;
+        }
+        stopLoop();
+        startLoop();
+        lastFrameAt = SystemClock.uptimeMillis();
+    }
+
+    /** One compact block of state, used by the overlay and by the log files. */
+    private String stateSnapshot(String reason) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("NEON DRIFT ").append(VERSION).append('\n');
+        sb.append("raison     : ").append(reason).append('\n');
+        sb.append("mode       : ").append(modeName(mode)).append('\n');
+        sb.append("alive      : ").append(engine.alive).append("  demo=").append(engine.demo)
+                .append('\n');
+        sb.append("playerX    : ").append(fmt(engine.playerX))
+                .append("  target=").append(fmt(engine.targetX)).append('\n');
+        sb.append("inputX     : ").append(fmt(inputTargetX)).append('\n');
+        sb.append("vitesse    : ").append(fmt(engine.speed))
+                .append("  entites=").append(engine.obstacleCount()).append('\n');
+        sb.append("score      : ").append(engine.score())
+                .append("  orbes=").append(engine.orbs).append('\n');
+        sb.append("surface    : ").append(renderer.surfaceWidth()).append('x')
+                .append(renderer.surfaceHeight()).append('\n');
+        sb.append("images     : ").append(drawnFrames)
+                .append("  fps=").append(fmt(fps)).append('\n');
+        sb.append("redemarr.  : ").append(restartCount)
+                .append("  gpu=").append(hardwareCanvas).append('\n');
+        sb.append("thread     : ").append(running).append('\n');
+        return sb.toString();
+    }
+
+    private static String fmt(float v) {
+        if (Float.isNaN(v)) {
+            return "NaN";
+        }
+        if (Float.isInfinite(v)) {
+            return v > 0 ? "+inf" : "-inf";
+        }
+        return String.format(Locale.US, "%.3f", v);
+    }
+
+    private static String modeName(int m) {
+        switch (m) {
+            case MODE_PLAY:
+                return "JEU";
+            case MODE_PAUSED:
+                return "PAUSE";
+            case MODE_OVER:
+                return "GAME OVER";
+            default:
+                return "MENU";
+        }
+    }
+
+    /** Writes the snapshot to last_state.txt (best effort, ~1 KB). */
+    private void saveState(String text) {
+        FileWriter writer = null;
+        try {
+            writer = new FileWriter(new File(getContext().getFilesDir(), "last_state.txt"));
+            writer.write(text);
+        } catch (IOException ignored) {
+            // diagnostic only: never let it break the game
+        } finally {
+            if (writer != null) {
+                try {
+                    writer.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    /** Five quick taps in the top-left corner toggle the diagnostic overlay. */
+    private boolean debugTap(float x, float y) {
+        long now = SystemClock.uptimeMillis();
+        if (x > getWidth() * 0.40f || y > getHeight() * 0.14f) {
+            debugTaps = 0;
+            return false;
+        }
+        if (now - debugTapAt > 2500L) {
+            debugTaps = 0;
+        }
+        debugTapAt = now;
+        debugTaps++;
+        if (debugTaps >= 5) {
+            debugTaps = 0;
+            debugOverlay = !debugOverlay;
+            if (debugOverlay) {
+                saveState(stateSnapshot("overlay activé"));
+            }
+            sfx.play(Sfx.TAP);
+            return true;
+        }
+        return false;
+    }
+
     // --------------------------------------------------------------- failures
 
     /** Records the error, stops the loop and shows it on screen. */
@@ -481,6 +687,9 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
     }
 
     private static float clampTarget(float v) {
+        if (Float.isNaN(v) || Float.isInfinite(v)) {
+            return 0f; // NaN survives both comparisons below: never let it in
+        }
         if (v < -Engine.TRACK_LIMIT) {
             return -Engine.TRACK_LIMIT;
         }
@@ -489,6 +698,9 @@ public final class GameView extends SurfaceView implements SurfaceHolder.Callbac
 
     private boolean onDown(float x, float y) {
         if (fatalError != null) {
+            return true;
+        }
+        if (debugTap(x, y)) {
             return true;
         }
         switch (mode) {

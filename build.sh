@@ -16,8 +16,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
 APP_NAME="NeonDrift"
-VERSION_NAME="1.1"
-VERSION_CODE="2"
+VERSION_NAME="1.2"
+VERSION_CODE="3"
 MIN_SDK="21"
 TARGET_SDK="34"
 BUILD_TOOLS_VERSION="34.0.0"
@@ -75,7 +75,11 @@ if [ "${1:-}" = "--test" ]; then
   mkdir -p "$OUT/test"
   "$JAVAC" -d "$OUT/test" $(find app/src/main/java/com/neondrift/rush/core -name '*.java') \
       test/EngineTest.java
-  "$JAVA" -cp "$OUT/test" EngineTest | tail -4
+  "$JAVA" -cp "$OUT/test" EngineTest | tail -4 | tee "$OUT/test.log"
+  if ! grep -q "0 failed" "$OUT/test.log"; then
+    echo "!! tests en echec" >&2
+    exit 1
+  fi
 fi
 
 # --------------------------------------------------------------- resources ---

@@ -29,6 +29,10 @@ public final class EngineTest {
         testEntityPoolIsBounded();
         testEntityPhasesDuringDeath();
         testNewRecordEvent();
+        testNanTargetIsRejected();
+        testNanPlayerXIsRepaired();
+        testInfiniteTargetIsRejected();
+        testLongRunStaysFinite();
 
         System.out.println();
         System.out.println("=================================================");
@@ -313,6 +317,95 @@ public final class EngineTest {
             }
         }
         e.setTargetX(0f);
+    }
+
+    // ---------------------------------------------------- NaN hardening ----
+
+    private static boolean finite(float v) {
+        return !Float.isNaN(v) && !Float.isInfinite(v);
+    }
+
+    /**
+     * A NaN target used to survive every clamp (all comparisons against NaN are
+     * false), so playerX became NaN for ever: the ship was never drawn again
+     * and steering stopped working while the world kept scrolling. Reported on
+     * a real device as "le vaisseau a disparu et je ne pouvais plus jouer".
+     */
+    private static void testNanTargetIsRejected() {
+        Engine e = new Engine(11L);
+        e.reset(0);
+        e.setTargetX(Float.NaN);
+        check("NaN: cible refusee (retour a 0)", Math.abs(e.targetX) < 1e-6f);
+        for (int i = 0; i < 60; i++) {
+            e.update(1f / 60f);
+        }
+        check("NaN: vaisseau toujours fini", finite(e.playerX));
+        check("NaN: vaisseau toujours sur la piste",
+                Math.abs(e.playerX) <= Engine.TRACK_LIMIT + 1e-4f);
+        // and the ship must respond again right after
+        e.setTargetX(0.6f);
+        for (int i = 0; i < 30; i++) {
+            e.update(1f / 60f);
+        }
+        check("NaN: direction de nouveau fonctionnelle", e.playerX > 0.3f);
+    }
+
+    private static void testNanPlayerXIsRepaired() {
+        Engine e = new Engine(12L);
+        e.reset(0);
+        e.playerX = Float.NaN;
+        e.playerVX = Float.NaN;
+        e.update(1f / 60f);
+        check("playerX NaN: repare immediatement", finite(e.playerX));
+        check("playerVX NaN: repare", finite(e.playerVX));
+        e.setTargetX(0.4f);
+        for (int i = 0; i < 30; i++) {
+            e.update(1f / 60f);
+        }
+        check("playerX NaN: pilotage restaure", e.playerX > 0.2f);
+    }
+
+    private static void testInfiniteTargetIsRejected() {
+        Engine e = new Engine(13L);
+        e.reset(0);
+        e.setTargetX(Float.POSITIVE_INFINITY);
+        check("+inf: cible refusee", finite(e.targetX));
+        e.setTargetX(Float.NEGATIVE_INFINITY);
+        check("-inf: cible refusee", finite(e.targetX));
+        e.update(1f / 60f);
+        check("+/-inf: vaisseau fini", finite(e.playerX));
+    }
+
+    /** 60 s of play with hostile inputs: nothing may ever go NaN or drift out. */
+    private static void testLongRunStaysFinite() {
+        Engine e = new Engine(14L);
+        e.reset(0);
+        float[] hostile = {Float.NaN, Float.POSITIVE_INFINITY, 0f, 1.2f, -1.2f,
+                Float.NEGATIVE_INFINITY, 0.5f};
+        boolean allFinite = true;
+        boolean onTrack = true;
+        for (int i = 0; i < 3600 && e.alive; i++) {
+            if (i % 7 == 0) {
+                e.setTargetX(hostile[(i / 7) % hostile.length]);
+            }
+            e.update(1f / 60f);
+            allFinite &= finite(e.playerX) && finite(e.playerVX) && finite(e.speed)
+                    && finite(e.travel) && finite(e.targetX) && finite(e.scoreF);
+            onTrack &= Math.abs(e.playerX) <= Engine.TRACK_LIMIT + 1e-4f;
+        }
+        check("60 s d'entrees hostiles: etat fini", allFinite);
+        check("60 s d'entrees hostiles: vaisseau sur la piste", onTrack);
+        check("60 s d'entrees hostiles: entites finies", entitiesFinite(e));
+    }
+
+    private static boolean entitiesFinite(Engine e) {
+        for (int i = 0; i < e.entities.size(); i++) {
+            Entity ent = e.entities.get(i);
+            if (!finite(ent.d) || !finite(ent.x)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void check(String label, boolean ok) {

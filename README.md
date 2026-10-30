@@ -6,7 +6,7 @@
 
 [![Android](https://img.shields.io/badge/Android-5.0%2B%20(API%2021%2B)-brightgreen)](https://developer.android.com)
 [![APK](https://img.shields.io/badge/APK-724%20Ko-blue)](dist/NeonDrift-1.0.apk)
-[![Tests](https://img.shields.io/badge/tests-27%20unitaires%20%2B%205%20rendu-25success)](#tests)
+[![Tests](https://img.shields.io/badge/tests-40%20unitaires%20%2B%205%20rendu-25success)](#tests)
 
 </div>
 
@@ -62,13 +62,26 @@ app/src/main/java/com/neondrift/rush/
 └── Palette.java          # palette synthwave
 
 app/src/main/res/         # icônes (adaptatives + PNG), thème, sons générés
-test/EngineTest.java      # 27 tests de la simulation (JVM pure, sans Android)
+test/EngineTest.java      # 40 tests de la simulation (JVM pure, sans Android)
 test/render/              # harnais de capture d'écran hors appareil (Robolectric)
 tools/gen_audio.py         # génère tous les .wav (effets + boucle musicale)
 tools/gen_icons.py         # génère les icônes PNG
 build.sh                  # compilation + signature de l'APK sans Gradle
 dist/NeonDrift-1.0.apk    # l'APK signé, prêt à installer
 ```
+
+## Intégration continue
+
+Chaque push, chaque pull request et chaque tag `v*` déclenche
+[`.github/workflows/build.yml`](.github/workflows/build.yml) sur GitHub Actions :
+
+| Job | Ce qu'il fait |
+|---|---|
+| `APK signé + tests JVM` | installe les paquets du SDK, lance `./build.sh --test`, vérifie l'APK (`aapt2`, `apksigner`), publie l'APK en artefact et l'attache à la release si c'est un tag |
+| `Tests de rendu et de non-régression` | résout Robolectric, dessine les écrans hors appareil, rejoue le test de régression du redimensionnement et archive les captures |
+
+Rien n'a besoin d'être compilé sur une machine locale : les binaires sortent de
+la CI (`Actions` → dernier run → `Artifacts` → `NeonDrift-apk`).
 
 ## Tests
 
@@ -125,7 +138,7 @@ Aucun Gradle, aucun Android Studio : `build.sh` enchaîne directement
 ```bash
 export ANDROID_SDK_ROOT=/chemin/vers/Android/Sdk   # build-tools 34 + platform 34
 ./build.sh            # -> dist/NeonDrift-1.0.apk
-./build.sh --test     # idem, après les 27 tests
+./build.sh --test     # idem, après les 40 tests
 ```
 
 Détails, prérequis et procédure d'installation sur le téléphone : **[BUILD.md](BUILD.md)**.
