@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- horizon glow -->
+    <path
+        android:pathData="M20,62 h68 v3 h-68 z"
+        android:fillColor="#55FF2E88" />
+    <!-- ship -->
+    <path
+        android:pathData="M54,26 L61,50 L78,64 L60,59 L54,74 L48,59 L30,64 L47,50 Z"
+        android:fillColor="#FFF2F7FF" />
+    <path
+        android:pathData="M54,26 L61,50 L78,64 L60,59 L54,74 L48,59 L30,64 L47,50 Z"
+        android:strokeColor="#FF2EF2FF"
+        android:strokeWidth="2.4" />
+    <path
+        android:pathData="M54,34 L56.5,52 L54,58 L51.5,52 Z"
+        android:fillColor="#FF2EF2FF" />
+    <path
+        android:pathData="M50,76 h8 l-4,9 z"
+        android:fillColor="#FFFF2E88" />
+</vector>

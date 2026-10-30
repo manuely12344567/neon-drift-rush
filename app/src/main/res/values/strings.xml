@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NEON DRIFT</string>
+    <string name="play">JOUER</string>
+    <string name="retry">REJOUER</string>
+    <string name="menu">MENU</string>
+    <string name="pause">PAUSE</string>
+    <string name="score">SCORE</string>
+    <string name="best">RECORD</string>
+</resources>
