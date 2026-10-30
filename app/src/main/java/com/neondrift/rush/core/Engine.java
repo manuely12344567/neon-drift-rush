@@ -175,6 +175,13 @@ public final class Engine {
 
     /** Moves the ship toward a lateral target, clamped to the track. */
     public void setTargetX(float x) {
+        if (!finite(x)) {
+            // NaN / infinite input used to be stored as-is; NaN then survived
+            // every clamp below, so playerX became NaN for ever, the ship was
+            // never drawn again and steering stopped responding.
+            targetX = 0f;
+            return;
+        }
         if (x < -TRACK_LIMIT) {
             x = -TRACK_LIMIT;
         }
@@ -215,6 +222,7 @@ public final class Engine {
             dt = 0.05f; // never tunnel through obstacles after a stall
         }
         events.clear();
+        sanitize();
 
         if (!alive) {
             deathTimer += dt;
@@ -255,6 +263,68 @@ public final class Engine {
         }
     }
 
+    /** True for every value a float can hold except NaN and +/-infinity. */
+    static boolean finite(float v) {
+        return !Float.isNaN(v) && !Float.isInfinite(v);
+    }
+
+    /**
+     * Repairs any state that has gone NaN or infinite.
+     *
+     * <p>{@code NaN} is not clamped by {@code if (x < -LIMIT) ...}: every
+     * comparison against it is false, so a single bad value propagates for
+     * ever. That is exactly how the ship could vanish for good on a device
+     * while the world kept scrolling. Called once per frame, it costs a few
+     * comparisons and makes that whole class of bug impossible.
+     */
+    public void sanitize() {
+        if (!finite(playerX)) {
+            playerX = 0f;
+            playerPrevX = 0f;
+            playerVX = 0f;
+        }
+        if (!finite(playerPrevX)) {
+            playerPrevX = playerX;
+        }
+        if (!finite(targetX)) {
+            targetX = 0f;
+        }
+        if (!finite(playerVX)) {
+            playerVX = 0f;
+        }
+        if (!finite(travel)) {
+            travel = 0f;
+        }
+        if (!finite(speed) || speed < MIN_SPEED || speed > MAX_SPEED * 2f) {
+            speed = MIN_SPEED;
+        }
+        if (!finite(scoreF)) {
+            scoreF = 0f;
+        }
+        if (!finite(comboTimer)) {
+            comboTimer = 0f;
+        }
+        if (!finite(deathTimer)) {
+            deathTimer = 0f;
+        }
+        if (!finite(runTime)) {
+            runTime = 0f;
+        }
+        if (!finite(difficulty)) {
+            difficulty = 0f;
+        }
+        if (playerX < -TRACK_LIMIT) {
+            playerX = -TRACK_LIMIT;
+        } else if (playerX > TRACK_LIMIT) {
+            playerX = TRACK_LIMIT;
+        }
+        if (targetX < -TRACK_LIMIT) {
+            targetX = -TRACK_LIMIT;
+        } else if (targetX > TRACK_LIMIT) {
+            targetX = TRACK_LIMIT;
+        }
+    }
+
     private void updatePlayer(float dt) {
         playerPrevX = playerX;
         float delta = targetX - playerX;
@@ -288,6 +358,11 @@ public final class Engine {
     private void updateEntities(float dt) {
         for (int i = entities.size() - 1; i >= 0; i--) {
             Entity e = entities.get(i);
+            if (!finite(e.d) || !finite(e.x)) {
+                entities.remove(i);
+                pool.add(e);
+                continue;
+            }
             e.prevD = e.d;
             e.d -= speed * dt;
             e.phase += dt * (e.type == Entity.TYPE_ORB ? 3.2f : 1.6f);

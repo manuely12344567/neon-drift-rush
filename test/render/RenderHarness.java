@@ -23,7 +23,7 @@ public class RenderHarness {
 
     private static final int W = 1080;
     private static final int H = 2280;
-    private static final String OUT = "/home/user/neon-drift-rush/screenshots/";
+    private static final String OUT = System.getProperty("neondrift.out", "screenshots/");
 
     @Test
     public void renderAllScreens() throws Exception {

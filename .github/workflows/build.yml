@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: APK signé + tests JVM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Paquets du SDK Android
+        run: tools/ci-sdk.sh
+
+      - name: Compilation + tests
+        run: ./build.sh --test
+
+      - name: Contrôle de l'APK
+        run: |
+          APK=$(ls dist/*.apk | head -1)
+          echo "APK: $APK ($(stat -c%s "$APK") octets)"
+          "$ANDROID_SDK_ROOT"/build-tools/34.0.0/aapt2 dump badging "$APK" | head -3
+          "$ANDROID_SDK_ROOT"/build-tools/34.0.0/apksigner verify --verbose --print-certs "$APK" | grep -E "Verified using|SHA-256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeonDrift-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Publier la release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.apk --clobber
+          else
+            gh release create "$tag" dist/*.apk \
+              --title "NEON DRIFT ${tag#v}" \
+              --notes-file CHANGELOG.md
+          fi
+
+  rendu:
+    name: Tests de rendu et de non-régression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Paquets du SDK Android
+        run: tools/ci-sdk.sh
+
+      - name: Robolectric + captures
+        run: tools/render-tests.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: captures-ecran
+          path: screenshots/*.png

@@ -1,5 +1,72 @@
 # Journal des modifications
 
+## 1.2 — 30 octobre 2026
+
+**« Le vaisseau disparaît au bout de quelques secondes et je ne peux plus jouer. »**
+
+### Cause
+
+Une valeur non finie (`NaN`) pouvait entrer dans la position latérale du
+vaisseau. Or `NaN` n'est attrapé par **aucun** des garde-fous existants : toutes
+les comparaisons avec `NaN` sont fausses, donc
+
+```java
+if (playerX < -TRACK_LIMIT) playerX = -TRACK_LIMIT;   // jamais exécuté
+if (playerX >  TRACK_LIMIT) playerX =  TRACK_LIMIT;   // jamais exécuté
+```
+
+laissaient `playerX` à `NaN` **définitivement**. Comme `Canvas` ignore
+silencieusement les coordonnées `NaN`, le vaisseau n'était plus jamais dessiné,
+et comme la consigne du doigt passait par la même valeur, le pilotage ne
+répondait plus — alors que le décor, lui, continuait de défiler normalement.
+D'où l'impression exacte : plus de vaisseau, plus de jeu, mais l'application
+n'a pas planté.
+
+Le `NaN` pouvait venir du doigt (`renderer.lateralAt()` sur une projection pas
+encore configurée) ou d'une valeur corrompue par un redimensionnement.
+
+### Corrections
+
+- `Engine.sanitize()`, appelée à chaque frame : toute valeur devenue `NaN` ou
+  infinie est réparée (`playerX`, `playerVX`, `targetX`, `speed`, `travel`,
+  `scoreF`, minuteries), puis la position est ramenée sur la piste.
+- `Engine.setTargetX()` refuse `NaN` et les infinis : la consigne revient à 0.
+- `GameView.clampTarget()` : même garde côté doigt, avant d'atteindre le moteur.
+- Les entités dont la distance ou la position ne sont pas finies sont retirées.
+- `NeonRenderer.drawPlayer()` : une position non finie est remplacée par 0 au
+  lieu d'être passée au `Canvas`.
+
+### Filet de sécurité (le jeu ne peut plus rester bloqué)
+
+- **Chien de garde** sur le thread UI : si aucune image n'a été postée depuis
+  4 s, la boucle de rendu est relancée (3 tentatives), puis un écran de
+  diagnostic lisible s'affiche au lieu d'une image figée.
+- **Génération de boucle** : deux boucles de rendu ne peuvent plus tourner en
+  même temps (c'était une cause possible d'image figée après un retour
+  d'arrière-plan).
+- Retour d'arrière-plan : la boucle est relancée si la surface est prête et que
+  le rendu ne tourne pas.
+- **Overlay de diagnostic** : 5 appuis rapides dans le coin haut-gauche affichent
+  l'état complet (mode, `playerX`, `targetX`, vitesse, entités, taille de
+  surface, images, FPS, redémarrages, thread, GPU). Le même état est écrit dans
+  `last_state.txt` toutes les 15 s.
+
+### Intégration continue
+
+- **GitHub Actions** construit l'APK, lance les 40 tests de simulation et les
+  5 tests de rendu, publie l'APK en artefact, et attache l'APK à la release
+  quand un tag `v*` est poussé. Les captures d'écran sont aussi archivées.
+- `build.sh --test` échoue désormais réellement quand un test échoue (le code de
+  sortie était masqué par le `| tail`).
+
+### Tests
+
+- 13 assertions ajoutées sur l'entrée `NaN`/infinie et sur 60 s de pilotage
+  hostile. **9 d'entre elles échouent sur la 1.1** (`vaisseau toujours fini`,
+  `direction de nouveau fonctionnelle`, ...) et toutes passent en 1.2.
+- Total : 40 tests de simulation + 5 tests de rendu.
+
+
 ## 1.1 — 30 octobre 2026
 
 **Correction du plantage au démarrage signalé sur téléphone** (le jeu s'ouvrait

@@ -102,6 +102,9 @@ public final class NeonRenderer {
     private int lastCombo = 1;
     private float comboPop;
 
+    /** On-screen diagnostics, set by GameView (null = hidden). */
+    private volatile String debugInfo;
+
     public NeonRenderer() {
         tfBlack = Typeface.create("sans-serif-black", Typeface.NORMAL);
         tfCondensed = Typeface.create("sans-serif-condensed", Typeface.BOLD);
@@ -125,6 +128,14 @@ public final class NeonRenderer {
      * bars) could recycle a bitmap the render thread was drawing, killing the
      * process with "Canvas: trying to use a recycled bitmap". Never again.
      */
+    /**
+     * Shows a small monospace block over the scene. Used by the hidden debug
+     * overlay and by the crash diagnostics; {@code null} hides it.
+     */
+    public void setDebugInfo(String info) {
+        this.debugInfo = info;
+    }
+
     public void resize(int width, int height) {
         if (width <= 0 || height <= 0) {
             return;
@@ -193,6 +204,16 @@ public final class NeonRenderer {
     }
 
     /** Converts a screen X into a lateral track position at the player depth. */
+    /** Applied surface width in pixels (0 until the first frame). */
+    public int surfaceWidth() {
+        return (int) w;
+    }
+
+    /** Applied surface height in pixels (0 until the first frame). */
+    public int surfaceHeight() {
+        return (int) h;
+    }
+
     public float lateralAt(float screenX) {
         return persp.lateralAtPlayer(screenX);
     }
@@ -430,11 +451,42 @@ public final class NeonRenderer {
 
         drawOverlay(c);
 
+        String debug = debugInfo;
+        if (debug != null) {
+            drawDebug(c, debug);
+        }
+
         if (flash > 0.01f) {
             fill.setColor(Palette.alpha(Palette.WHITE, (int) (flash * 190)));
             fill.setShader(null);
             c.drawRect(0, 0, w, h, fill);
             flash *= (float) Math.pow(0.0009f, dt);
+        }
+    }
+
+    private void drawDebug(Canvas c, String info) {
+        String[] lines = info.split("\n");
+        float size = Math.max(15f, w * 0.019f);
+        text.setTypeface(Typeface.MONOSPACE);
+        text.setTextSize(size);
+        text.setAlpha(255);
+        float pad = size * 0.5f;
+        float lineH = size * 1.28f;
+        float top = h * 0.30f;
+        float widest = 0f;
+        for (int i = 0; i < lines.length; i++) {
+            widest = Math.max(widest, text.measureText(lines[i]));
+        }
+        fill.setShader(null);
+        fill.setAlpha(210);
+        fill.setColor(0xFF07030F);
+        c.drawRect(pad, top - lineH, pad * 3f + widest, top + lines.length * lineH, fill);
+        fill.setAlpha(255);
+        text.setColor(0xFF7CFFC4);
+        float y = top;
+        for (int i = 0; i < lines.length; i++) {
+            c.drawText(lines[i], pad * 2f, y, text);
+            y += lineH;
         }
     }
 
@@ -800,7 +852,11 @@ public final class NeonRenderer {
     // ------------------------------------------------------------------ player
 
     private void drawPlayer(Canvas c, Engine engine, float anim) {
-        float sx = persp.screenX(engine.playerX, Engine.PLAYER_D);
+        float px = engine.playerX;
+        if (Float.isNaN(px) || Float.isInfinite(px)) {
+            px = 0f; // never hand a NaN to the canvas: it silently draws nothing
+        }
+        float sx = persp.screenX(px, Engine.PLAYER_D);
         float sy = persp.screenY(Engine.PLAYER_D);
         float s = w * 0.132f;
 
